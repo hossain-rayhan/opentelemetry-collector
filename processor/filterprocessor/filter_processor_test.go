@@ -21,6 +21,7 @@ import (
 	"time"
 
 	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
+	resourcepb "github.com/census-instrumentation/opencensus-proto/gen-go/resource/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -77,6 +78,10 @@ var (
 	regexpMetricsFilterProperties = &filtermetric.MatchProperties{
 		MatchType:   filtermetric.Regexp,
 		MetricNames: validFilters,
+	}
+
+	resource = &resourcepb.Resource{
+		Labels: map[string]string{"attr1": "attr1/val1", "attr2": "attr2/val2", "attr3": "attr3/val3"},
 	}
 
 	standardTests = []metricNameTest{
@@ -176,6 +181,23 @@ var (
 			inMN:  [][]*metricspb.Metric{metricsWithName(inMetricNames)},
 			outMN: [][]string{inMetricNames},
 		},
+		{
+			name: "includeWithResourceAttributes",
+			inc: &filtermetric.MatchProperties{
+				MatchType: filtermetric.Strict,
+				MetricNames: []string{
+					"prefix_test_match",
+					"test_contains_match",
+				},
+			},
+			inMN: [][]*metricspb.Metric{metricsWithNameAndResource(inMetricNames, resource)},
+			outMN: [][]string{
+				{
+					"prefix_test_match",
+					"test_contains_match",
+				},
+			},
+		},
 	}
 )
 
@@ -249,6 +271,33 @@ func metricsWithName(names []string) []*metricspb.Metric {
 				Name: name,
 				Type: metricspb.MetricDescriptor_GAUGE_INT64,
 			},
+			Timeseries: []*metricspb.TimeSeries{
+				{
+					Points: []*metricspb.Point{
+						{
+							Timestamp: timestamppb.New(now.Add(10 * time.Second)),
+							Value: &metricspb.Point_Int64Value{
+								Int64Value: int64(123),
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	return ret
+}
+
+func metricsWithNameAndResource(names []string, r *resourcepb.Resource) []*metricspb.Metric {
+	ret := make([]*metricspb.Metric, len(names))
+	now := time.Now()
+	for i, name := range names {
+		ret[i] = &metricspb.Metric{
+			MetricDescriptor: &metricspb.MetricDescriptor{
+				Name: name,
+				Type: metricspb.MetricDescriptor_GAUGE_INT64,
+			},
+			Resource: r,
 			Timeseries: []*metricspb.TimeSeries{
 				{
 					Points: []*metricspb.Point{

@@ -16,6 +16,8 @@ package filterprocessor
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 
 	"go.uber.org/zap"
 
@@ -45,19 +47,23 @@ func newFilterMetricProcessor(logger *zap.Logger, cfg *Config) (*filterMetricPro
 	includeMatchType := ""
 	var includeExpressions []string
 	var includeMetricNames []string
+	var includeResourceAttributes map[string][]string
 	if cfg.Metrics.Include != nil {
 		includeMatchType = string(cfg.Metrics.Include.MatchType)
 		includeExpressions = cfg.Metrics.Include.Expressions
 		includeMetricNames = cfg.Metrics.Include.MetricNames
+		includeResourceAttributes = cfg.Metrics.Include.ResourceAttributes
 	}
 
 	excludeMatchType := ""
 	var excludeExpressions []string
 	var excludeMetricNames []string
+	var excludeResourceAttributes map[string][]string
 	if cfg.Metrics.Exclude != nil {
 		excludeMatchType = string(cfg.Metrics.Exclude.MatchType)
 		excludeExpressions = cfg.Metrics.Exclude.Expressions
 		excludeMetricNames = cfg.Metrics.Exclude.MetricNames
+		excludeResourceAttributes = cfg.Metrics.Exclude.ResourceAttributes
 	}
 
 	logger.Info(
@@ -65,9 +71,11 @@ func newFilterMetricProcessor(logger *zap.Logger, cfg *Config) (*filterMetricPro
 		zap.String("include match_type", includeMatchType),
 		zap.Strings("include expressions", includeExpressions),
 		zap.Strings("include metric names", includeMetricNames),
+		zap.Any("include metrics with resource attributes", includeResourceAttributes),
 		zap.String("exclude match_type", excludeMatchType),
 		zap.Strings("exclude expressions", excludeExpressions),
 		zap.Strings("exclude metric names", excludeMetricNames),
+		zap.Any("exclude metrics with resource attributes", excludeResourceAttributes),
 	)
 
 	return &filterMetricProcessor{
@@ -95,6 +103,16 @@ func (fmp *filterMetricProcessor) ProcessMetrics(_ context.Context, pdm pdata.Me
 		if rm.IsNil() {
 			continue
 		}
+
+		keepMetricsForResource, err := fmp.shouldKeepMetricsForResource(rm.Resource())
+		if err != nil {
+			fmp.logger.Error("shouldKeepMetricsForResource failed", zap.Error(err))
+			// don't `continue`, keep the metric if there's an error
+		}
+		if !keepMetricsForResource {
+			continue
+		}
+
 		ilms := rm.InstrumentationLibraryMetrics()
 		for j := 0; j < ilms.Len(); j++ {
 			ilm := ilms.At(j)
@@ -147,4 +165,67 @@ func (fmp *filterMetricProcessor) shouldKeepMetric(metric pdata.Metric) (bool, e
 	}
 
 	return true, nil
+}
+
+func (fmp *filterMetricProcessor) shouldKeepMetricsForResource(resource pdata.Resource) (bool, error) {
+	// default to keep if tries to filter metrics with null resource
+	if resource.IsNil() {
+		return true, fmt.Errorf("Metrics with null resource")
+	}
+	resourceAttributes := resource.Attributes()
+
+	if fmp.include != nil {
+		for key, filterList := range fmp.cfg.Metrics.Include.ResourceAttributes {
+			attributeValue, ok := resourceAttributes.Get(key)
+			if ok {
+				attributeMatched, err := attributeMatch(filterList, attributeValue)
+				// default to keep if there's an error
+				if err != nil {
+					return true, err
+				}
+				if !attributeMatched {
+					return false, nil
+				}
+			}
+		}
+	}
+
+	if fmp.exclude != nil {
+		for key, filterList := range fmp.cfg.Metrics.Exclude.ResourceAttributes {
+			attributeValue, ok := resourceAttributes.Get(key)
+			if ok {
+				attributeMatched, err := attributeMatch(filterList, attributeValue)
+				// default to keep if there's an error
+				if err != nil {
+					return true, err
+				}
+				if attributeMatched {
+					return false, nil
+				}
+			}
+		}
+	}
+
+	return true, nil
+}
+
+func attributeMatch(filterList []string, attributeValue pdata.AttributeValue) (bool, error) {
+	attribute := ""
+	switch attributeValue.Type() {
+	case pdata.AttributeValueSTRING:
+		attribute = attributeValue.StringVal()
+	case pdata.AttributeValueBOOL:
+		attribute = strconv.FormatBool(attributeValue.BoolVal())
+	case pdata.AttributeValueINT:
+		attribute = strconv.FormatInt(attributeValue.IntVal(), 10)
+	default:
+		return true, fmt.Errorf("Filter processor cannot convert attribute type to string")
+	}
+
+	for _, item := range filterList {
+		if item == attribute {
+			return true, nil
+		}
+	}
+	return false, nil
 }
